@@ -30,27 +30,44 @@ def parse_battery_level(file_path):
     return None
 
 def parse_power_consumers(file_path):
+    """Parses the power consumption section with improved, multi-stage logic."""
     consumers = []
     try:
-        content = file_path.read_text()
-        in_power_section = False
-        consumer_regex = re.compile(r'^\s{2,}(.+?):\s*([\d\.]+)')
-        for line in content.splitlines():
-            if 'Estimated power use (mAh)' in line:
-                in_power_section = True
-                continue
-            if in_power_section:
-                if not line.strip() or 'Per-app mobile ms per packet' in line:
-                    break
-                if 'Capacity:' in line or 'Computed drain:' in line:
-                    continue
-                match = consumer_regex.search(line)
-                if match:
-                    full_name, power_mah = match.groups()
-                    name = re.sub(r'Uid [^\s]+ \((.*)\)', r'\1', full_name).strip()
-                    consumers.append({'name': name, 'power_mah': float(power_mah)})
+        content = file_path.read_text(encoding='utf-8')
     except Exception as e:
-        print(f"Could not parse power consumers from {file_path}: {e}")
+        print(f"Could not read {file_path}: {e}")
+        return []
+
+    in_power_section = False
+    base_consumer_regex = re.compile(r'^\s{2,}(.+?):\s*([\d\.]+)')
+
+    for line in content.splitlines():
+        if 'Estimated power use (mAh)' in line:
+            in_power_section = True
+            continue
+        if in_power_section:
+            if not line.strip() or 'Per-app mobile ms per packet' in line:
+                break
+            if 'Capacity:' in line or 'Computed drain:' in line:
+                continue
+
+            base_match = base_consumer_regex.search(line)
+            if not base_match:
+                continue
+
+            full_label, power_mah = base_match.groups()
+            name_to_store = full_label.strip()
+
+            name_in_parens_match = re.search(r'\((.*?)\)', full_label)
+            if name_in_parens_match:
+                name_to_store = name_in_parens_match.group(1)
+            else:
+                uid_match = re.search(r'uid\s+([^\s]+)', full_label, re.IGNORECASE)
+                if uid_match:
+                    name_to_store = uid_match.group(1)
+
+            consumers.append({'name': name_to_store, 'power_mah': float(power_mah)})
+
     return consumers
 
 def parse_time(time_str):
@@ -81,10 +98,7 @@ def parse_battery_history(file_path):
             return pd.DataFrame()
         start_time = datetime.strptime(reset_time_match.group(1), '%Y-%m-%d-%H-%M-%S')
 
-        # Regex for the event part, not the whole line
         longwake_regex = re.compile(r'([+-])longwake=([^:]+):"(.*?)"')
-        
-        # Anchor to find the start of the event details
         header_anchor_regex = re.compile(r'\(\d+\)\s+\d{3}\s+')
 
         for line in content.splitlines():
@@ -92,9 +106,7 @@ def parse_battery_history(file_path):
             if not anchor_match:
                 continue
 
-            # The event details are everything after the anchor
             event_details = line[anchor_match.end():]
-            # The timestamp is everything before the anchor
             timestamp_str = line[:anchor_match.start()].strip()
 
             if not timestamp_str.startswith('+'):
@@ -115,12 +127,37 @@ def parse_battery_history(file_path):
         print(f"Error parsing battery history from {file_path}: {e}")
     return pd.DataFrame(events)
 
+def get_package_map_from_log(log_dir):
+    """Parses packages.txt from a log dir to create a UID-to-package-name map."""
+    package_map = {}
+    packages_file = log_dir / 'packages.txt'
+    if not packages_file.exists():
+        return package_map
+    try:
+        content = packages_file.read_text(encoding='utf-8')
+    except Exception as e:
+        print(f"Could not read {packages_file}: {e}")
+        return package_map
+
+    package_regex = re.compile(r"package:(.*?)\s+uid:(\d+)")
+    for line in content.splitlines():
+        match = package_regex.search(line)
+        if match:
+            package_name, user_id = match.groups()
+            if int(user_id) >= 10000:
+                uid_str = f"u0a{int(user_id) - 10000}"
+                package_map[uid_str] = package_name
+    return package_map
+
 # --- DATA PROCESSING & AGGREGATION ---
 
 def process_all_logs():
     log_dirs = get_log_dirs()
     if not log_dirs:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    latest_log_dir = log_dirs[-1]
+    app_map = get_package_map_from_log(latest_log_dir)
 
     battery_df = pd.DataFrame([{'timestamp': datetime.strptime(d.name, '%Y-%m-%d_%H-%M'), 'level': parse_battery_level(d / 'battery.txt')} for d in log_dirs if parse_battery_level(d / 'battery.txt') is not None]).set_index('timestamp')
 
@@ -129,6 +166,17 @@ def process_all_logs():
         power_data.extend(parse_power_consumers(log_dir / 'batterystats.txt'))
     power_df = pd.DataFrame(power_data)
     total_power_df = power_df.groupby('name')['power_mah'].sum().sort_values(ascending=False).reset_index() if not power_df.empty else pd.DataFrame(columns=['name', 'power_mah'])
+
+    # Map UIDs to app names and aggregate 'System/Other'
+    if not total_power_df.empty and app_map:
+        def map_uid_to_name(name):
+            if name.startswith('u0a') or name.isdigit():
+                return app_map.get(name, 'System/Other')
+            return name
+        total_power_df['name'] = total_power_df['name'].apply(map_uid_to_name)
+        
+        # Now that names are mapped, group by name again to aggregate all 'System/Other'
+        total_power_df = total_power_df.groupby('name')['power_mah'].sum().reset_index()
 
     all_events_df = pd.concat([parse_battery_history(log_dir / 'batterystats.txt') for log_dir in log_dirs])
     if all_events_df.empty:
@@ -142,23 +190,12 @@ def process_all_logs():
     used_end_indices = set()
 
     for start_idx, start_event in starts.iterrows():
-        potential_ends = ends[
-            (ends['uid'] == start_event['uid']) &
-            (ends['tag'] == start_event['tag']) &
-            (ends['timestamp'] > start_event['timestamp']) &
-            (~ends.index.isin(used_end_indices))
-        ]
-        
+        potential_ends = ends[(ends['uid'] == start_event['uid']) & (ends['tag'] == start_event['tag']) & (ends['timestamp'] > start_event['timestamp']) & (~ends.index.isin(used_end_indices))]
         if not potential_ends.empty:
             end_event = potential_ends.iloc[0]
             duration = (end_event['timestamp'] - start_event['timestamp']).total_seconds()
-            
             if duration >= 0:
-                wakelock_periods.append({
-                    'uid': start_event['uid'],
-                    'tag': start_event['tag'],
-                    'duration_s': duration
-                })
+                wakelock_periods.append({'uid': start_event['uid'], 'tag': start_event['tag'], 'duration_s': duration})
                 used_end_indices.add(end_event.name)
 
     if not wakelock_periods:
@@ -166,6 +203,12 @@ def process_all_logs():
 
     longwake_summary_df = pd.DataFrame(wakelock_periods)
     total_longwake_df = longwake_summary_df.groupby(['uid', 'tag'])['duration_s'].sum().sort_values(ascending=False).reset_index()
+
+    # Add a mapped app_name column for completeness
+    if not total_longwake_df.empty and app_map:
+        total_longwake_df['app_name'] = total_longwake_df['uid'].map(app_map).fillna('System/Other')
+    elif not total_longwake_df.empty:
+        total_longwake_df['app_name'] = 'System/Other'
 
     return battery_df, total_power_df, total_longwake_df
 
@@ -185,9 +228,11 @@ def plot_top_consumers(power_df, top_n=15):
         print("No power consumption data found.")
         return
     top_consumers = power_df.head(top_n)
+    # The 'name' column is now clean, so we can use it directly.
+    y_col = 'name'
     plt.style.use('ggplot')
     fig, ax = plt.subplots(figsize=(10, 8))
-    sns.barplot(x='power_mah', y='name', data=top_consumers, ax=ax, palette='viridis')
+    sns.barplot(x='power_mah', y=y_col, data=top_consumers, ax=ax, palette='viridis')
     ax.set_title(f'Top {top_n} Power Consumers (Total mAh)')
     ax.set_xlabel('Total Power Consumed (mAh)')
     ax.set_ylabel('Application / Component')
@@ -199,13 +244,17 @@ def plot_top_longwakes(wakelock_df, top_n=20):
         print("No significant longwake data to plot.")
         return
     top_items = wakelock_df.head(top_n).copy()
-    top_items['label'] = top_items['uid'] + ': ' + top_items['tag']
+    # Use the new 'app_name' column for cleaner labels if it exists.
+    if 'app_name' in top_items.columns:
+        top_items['label'] = top_items['app_name'] + ': ' + top_items['tag'].str.split('/').str[-1]
+    else:
+        top_items['label'] = top_items['uid'] + ': ' + top_items['tag']
     plt.style.use('ggplot')
     fig, ax = plt.subplots(figsize=(10, 10))
     sns.barplot(x='duration_s', y='label', data=top_items, ax=ax, palette='plasma')
     ax.set_title(f'Top {top_n} Longwake Durations')
     ax.set_xlabel('Total Duration (seconds)')
-    ax.set_ylabel('Wakelock UID & Tag')
+    ax.set_ylabel('Wakelock App & Tag')
     plt.tight_layout()
     plt.show()
 
@@ -242,7 +291,6 @@ def parse_device_info(log_dir_path):
     ORIGINAL_CAPACITY_MAH = 4500 # Original design capacity
 
     try:
-        # (Corrected logic) Parse Model and OS Version from device_info.txt
         info_file = log_dir_path / 'device_info.txt'
         if info_file.exists():
             lines = info_file.read_text().splitlines()
@@ -252,7 +300,6 @@ def parse_device_info(log_dir_path):
                 if "Android Version:" in line and i + 1 < len(lines) and lines[i+1].strip():
                     info['android_version'] = lines[i+1].strip()
 
-        # Parse battery capacity from batterystats.txt to calculate health
         stats_file = log_dir_path / 'batterystats.txt'
         if stats_file.exists():
             content = stats_file.read_text()

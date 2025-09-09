@@ -59,6 +59,11 @@ echo Collecting device info...
 echo   - Saved to %LogDir%\device_info.txt
 
 echo.
+echo Collecting package list...
+adb shell pm list packages -U > "%LogDir%\packages.txt"
+echo   - Saved to %LogDir%\packages.txt
+
+echo.
 echo --- IMPORTANT ---
 echo Re-enabling charging.
 adb shell dumpsys battery reset
