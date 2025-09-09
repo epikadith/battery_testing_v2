@@ -10,6 +10,7 @@ This is designed to help users identify which applications and system processes 
 - **In-depth Parsing:** A Python module that parses complex `batterystats` dumps, including power consumption (mAh) and wakelock durations.
 - **Data Visualization:** The Jupyter Notebook provides clear charts for battery level over time, top power-consuming apps, and longest-held wakelocks.
 - **AI-Powered Reporting:** Uses the Google Gemini API to analyze the processed data and generate a detailed report that explains the causes of battery drain and suggests concrete solutions.
+- **PDF Report Generation:** A script to generate a clean, timestamped PDF report of the entire analysis, perfect for sharing.
 
 ## Prerequisites
 
@@ -80,11 +81,22 @@ The final part of the notebook uses the Google Gemini API to analyze your data.
 2.  **Set the API Key:** In the notebook, you will find a cell designed for setting your API key. Run this cell and enter your key when prompted. Using the `getpass` method is recommended for security, as it won't display your key in the notebook.
 3.  **Run the Final Cell:** Execute the last cell to send your data to the Gemini API. It will print a detailed report analyzing the top battery offenders and providing actionable recommendations.
 
+### Step 5: Generate a PDF Report (Optional)
+
+If you want a shareable PDF summary of the analysis without running the Jupyter Notebook manually, you can use the `generate_report.py` script.
+
+In your terminal (with the virtual environment active), simply run:
+```bash
+python generate_report.py
+```
+This will create a `results` directory (if it doesn't exist) and save a timestamped PDF file inside it.
+
 ## File Overview
 
 -   `collect_logs.bat`: A script to collect battery statistics and device info from a connected Android device.
 -   `reset_logs.bat`: A utility script to reset the battery statistics on the device for a clean analysis.
 -   `parsing.py`: A Python module containing all the functions for parsing the raw log files.
+-   `generate_report.py`: A script to automatically run the entire analysis and generate a timestamped PDF report.
 -   `results.ipynb`: The main Jupyter Notebook for data processing, visualization, and generating the final AI report.
 -   `requirements.txt`: A list of all Python dependencies required for the project.
 
